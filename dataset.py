@@ -1,95 +1,78 @@
 import lcdb
+from lcdb import get_all_curves
+import pandas as pd
+import numpy as np
 import torch
 from typing import Callable, List, Any, Dict
-from tqdm import tqdm
-
-
-"""
-LCDB provides the worst every api to access the data,
-so we are just going to write a simple-ish wrapper around it,
-that allows for a convenient filtering.
-
-The idea is to allow for things like ```
-dataset = LCDB()
-
-dataset \\
-    .filter(lambda x: x.dataset == 'blahblah') \\
-    .filter(lambda x: x.model == 'linearregression')
-
-since this is much more convenient
-"""
-
-class Curve:
-    """
-    A single instance of a learning curve;
-    contains 3 sets of the outputs indexed by anchors:
-    - train, val and test
-
-    in addition, we, of course, include the list of anchors:
-    - anchors
-
-    and the dataset and model that generated this curve:
-    - dataset: str, model: str
-
-    So the issue here is that we are losing the ability to
-    distinguish between different outer/inner seeds, etc
-    but I don't care currently: let's just consider all of them
-    to be simply different augmentations of the original one.
-
-    However, for reasons of better in-domain testing, I include
-    'seed' that is representative of the split (combination of
-    outer and inner seeds) that was used to generate this curve.
-    """
-    anchors: torch.Tensor
-    train: torch.Tensor
-    val: torch.Tensor
-    test: torch.Tensor
-
-    dataset: int
-    learner: int
-    seed: int
-
-    def __init__(self, anchors, train, val, test, dataset, learner, seed) -> None:
-        self.anchors = anchors
-        self.train = train
-        self.val = val
-        self.test = test
-        self.dataset = dataset
-        self.learner = learner
-        self.seed = seed
 
 
 class LCDB:
-    """
-    Does the processing of the curves, and overall is the main entry point.
+    data: pd.DataFrame
+    def __init__(self, data=None):
+        if data is not None:
+            self.data = data
+        else:
+            self.data = get_all_curves()
 
-    Allows to get meta-features of datasets, curves, etc, etc...
-    """
+    def isin(self, row_name=None, values=None):
+        if row_name is None or values is None:
+            raise ValueError("Both row_name and values must be provided.")
+        return LCDB(self.data[self.data[row_name].isin(values)])
 
-    curves: List[Curve]
-    datasets: List[int]
-    learners: List[str]
-    meta_features: Dict[str, Dict[str, Any]]
-
-    def load(self):
-        self.curves = []
-        all_curves = lcdb.get_all_curves()
-        self.learners = (all_curves["learner"].unique())
-        self.datasets = (all_curves["openmlid"].unique())
-        self.datasets = [int(x) for x in self.datasets]
+    def to_curve_list(self):
+        grouped = self.data.sort_values('size_train').groupby('size_train')
 
 
+        dirty_anchors = grouped['size_train'].groups.keys()
+
+        min_exp = 4
+        max_exp_int = 50
+        curves_anchor_first = {}
+
+        for exp in range(0, max_exp_int + 1):
+            anchor = int(np.round(2**(min_exp + 0.5 * exp)))
+            if anchor not in dirty_anchors:
+                continue
+
+            group = grouped.get_group(anchor)
+            curves_anchor_first[anchor] = group.values
+
+        num_curves = max(len(group) for group in curves_anchor_first.values())
+        num_anchors = len(curves_anchor_first)
+
+        train_array = np.full((num_curves, num_anchors), np.nan)
+        valid_array = np.full((num_curves, num_anchors), np.nan)
+        test_array = np.full((num_curves, num_anchors), np.nan)
+        meta_features = {}
+
+        anchor_indices = {anchor: idx for idx, anchor in
+                          enumerate(sorted(curves_anchor_first.keys()))}
+
+        # Iterate and populate the arrays
+        curve_id_registry = {}
+        for anchor, group in curves_anchor_first.items():
+            anchor_idx = anchor_indices[anchor]
+            for row in group:
+                curve_id = f'{row[0]}_{row[1]}_{row[5]}'
+                if curve_id not in curve_id_registry.keys():
+                    curve_id_registry[curve_id] = len(curve_id_registry)
+                curve_index = curve_id_registry[curve_id]
+
+                train_array[curve_index, anchor_idx] = row[-3]  # Assuming row[0] is train
+                valid_array[curve_index, anchor_idx] = row[-2]  # Assuming row[1] is valid
+                test_array[curve_index, anchor_idx] = row[-1]
+                meta_features[curve_index] = row[:-3]
+
+        return anchors, values_train, values_valid, values_test
 
 
-
-
-    def filter(self, f: Callable[[Curve], bool]):
-        return LCDB([curve for curve in self.curves if f(curve)])
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     dataset = LCDB()
-    dataset.load()
-    print(dataset.curves)
+
+    dataset = dataset.isin('openmlid', list(range(100)))
+    dataset = dataset.isin('learner', ['SVC_linear'])
+    curves = dataset.to_curve_list()
+
+    print(curves)
 
 
